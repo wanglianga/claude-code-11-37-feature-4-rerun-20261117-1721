@@ -1,0 +1,8 @@
+services:
+  attribution-web:
+    build: .
+    image: channel-attribution-workbench:latest
+    container_name: attribution-workbench
+    ports:
+      - "8080:80"
+    restart: unless-stopped
