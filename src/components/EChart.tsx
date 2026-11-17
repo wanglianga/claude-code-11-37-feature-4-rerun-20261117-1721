@@ -6,7 +6,7 @@ interface EChartProps {
   className?: string;
   /** 高度由 className 控制；切换 option 时做增量 setOption */
   merge?: boolean;
-  /** 图形元素点击（如从渠道扇区下钻到该渠道的订单列表） */
+  /** 图形元素点击（预留：从账户/系列下钻到对应分区明细） */
   onClick?: (params: echarts.ECElementEvent) => void;
 }
 

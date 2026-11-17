@@ -1,8 +1,8 @@
 services:
-  attribution-web:
+  bill-reconcile-web:
     build: .
-    image: channel-attribution-workbench:latest
-    container_name: attribution-workbench
+    image: platform-bill-reconciliation:latest
+    container_name: bill-reconciliation-workbench
     ports:
       - "8080:80"
     restart: unless-stopped

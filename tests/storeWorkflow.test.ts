@@ -11,109 +11,111 @@ const mem = new Map<string, string>();
   get length() { return mem.size; },
 };
 
-import { useAppStore } from '@/store/useAppStore';
-import { verifyInvariants } from '@/engine/attribution';
-import { RULE_REVISION_V1, RULE_REVISION_V2 } from '@/data/sampleData';
-import type { RunConfig } from '@/types/domain';
+import { useAppStore, selectBillRows } from '@/store/useAppStore';
+import { partitionKeyString } from '@/engine/reconcile';
+import { SAMPLE_FILES } from '@/data/sampleFiles';
 
-const config: RunConfig = {
-  timezone: 'Asia/Shanghai',
-  dealDefinition: 'net_of_refund_at_lock',
-  windowDays: 7,
-  model: 'linear',
-  ruleRevision: RULE_REVISION_V1,
-  decayHalfLifeDays: 7,
-};
+const sample = (fileName: string) => SAMPLE_FILES.find((s) => s.fileName === fileName)!;
 
-describe('归因运行全生命周期工作流', () => {
+describe('对账全链路（导入 → 受理 → 运行 → 确认 → 结账 → 调整 → 汇率修订）', () => {
   beforeEach(() => {
     useAppStore.getState().resetDemo();
   });
 
-  it('草稿→执行→审批核对→锁定→分享，结果守恒且只有锁定运行可分享', async () => {
+  it('初始三文件经解析管线成为受理账批次', () => {
     const s = useAppStore.getState();
-    const runId = s.createDraftRun({ snapshotId: 'DS-2026-11-01', config });
-    expect(useAppStore.getState().runs[0].status).toBe('draft');
+    expect(s.batches).toHaveLength(3);
+    expect(selectBillRows(s.batches).length).toBe(10);
+    expect(s.runs).toHaveLength(0);
+  });
 
-    await useAppStore.getState().executeRun(runId);
-    let run = useAppStore.getState().runs.find((r) => r.runId === runId)!;
-    expect(run.status).toBe('completed');
-    expect(verifyInvariants(run.results!).ok).toBe(true);
+  it('V1 首次核平：9 分区、2 阻断、1 日内迁移警告、守恒成立', () => {
+    const run = useAppStore.getState().createRun('initial');
+    expect(run.version).toBe(1);
+    expect(run.accountDays).toHaveLength(9);
+    expect(run.blockers.length).toBe(2);
+    expect(run.warnings.some((w) => w.includes('日内活动迁移'))).toBe(true);
+    for (const d of run.accountDays) {
+      const assigned = run.campaignLines
+        .filter((l) => partitionKeyString(l) === partitionKeyString(d) && l.status !== 'pending_allocation')
+        .reduce((a, l) => a + l.amountMinor, 0);
+      expect(assigned + d.unassignedMinor).toBe(d.correctedMinor);
+    }
+  });
 
-    // 未锁定不能分享
-    const blocked = useAppStore.getState().createSharedReport(runId, '提前分享', 'U-2001');
+  it('重复导入：两条均判为重复件，V2 含 2 条重复候选比较且金额不翻倍', () => {
+    useAppStore.getState().createRun('initial');
+    const outcome = useAppStore.getState().importSample(sample('platform-bill-reimport-duplicates.csv'));
+    expect(outcome.duplicateCount).toBe(2);
+    expect(outcome.acceptedCount).toBe(0);
+    const v2 = useAppStore.getState().createRun('reimport');
+    expect(v2.comparisons.filter((c) => c.status === 'duplicate_candidate')).toHaveLength(2);
+    const cn = v2.accountDays.find((d) => partitionKeyString(d) === 'ACC-CN-01|2026-11-01|CNY')!;
+    expect(cn.correctedMinor).toBe(1500000);
+  });
+
+  it('同号更正件：V3 只重开 JP 分区，其余分区继承且状态为 reopened', () => {
+    useAppStore.getState().createRun('initial');
+    const outcome = useAppStore.getState().importSample(sample('platform-bill-jp-correction.csv'));
+    expect(outcome.revisionCount).toBe(1);
+    const v3 = useAppStore.getState().createRun('correction');
+    expect(v3.status).toBe('reopened');
+    const jp = v3.accountDays.find((d) => partitionKeyString(d) === 'ACC-JP-03|2026-11-01|JPY')!;
+    expect(jp.correctedMinor).toBe(118000);
+    expect(jp.carriedFromRunId).toBeUndefined();
+    const carried = v3.accountDays.filter((d) => d.carriedFromRunId);
+    expect(carried.length).toBe(8);
+  });
+
+  it('分级确认：阻断分区被拒；平衡分区可确认并结账', () => {
+    useAppStore.getState().createRun('initial');
+    const blocked = useAppStore.getState().confirm({
+      level: 'account', partition: { accountId: 'ACC-US-02', billDay: '2026-11-03', currency: 'USD' },
+    });
     expect(blocked.ok).toBe(false);
-
-    const approval = useAppStore.getState().approveRun(runId, 'U-2001');
-    expect(approval.ok).toBe(true);
-    const lock = useAppStore.getState().lockRun(runId);
-    expect(lock.ok).toBe(true);
-    run = useAppStore.getState().runs.find((r) => r.runId === runId)!;
-    expect(run.status).toBe('locked');
-
-    const shared = useAppStore.getState().createSharedReport(runId, '双月渠道贡献', 'U-2001');
-    expect(shared.ok).toBe(true);
-    expect(shared.shareId).toBeTruthy();
+    const ok = useAppStore.getState().confirm({
+      level: 'account', partition: { accountId: 'ACC-US-02', billDay: '2026-11-02', currency: 'USD' },
+    });
+    expect(ok.ok).toBe(true);
+    const closed = useAppStore.getState().closePartition({ accountId: 'ACC-US-02', billDay: '2026-11-02', currency: 'USD' });
+    expect(closed.ok).toBe(true);
+    const again = useAppStore.getState().closePartition({ accountId: 'ACC-US-02', billDay: '2026-11-02', currency: 'USD' });
+    expect(again.ok).toBe(false);
   });
 
-  it('规则修订与快照不一致时审批驳回，且不能锁定', async () => {
-    const s = useAppStore.getState();
-    const runId = s.createDraftRun({ snapshotId: 'DS-2026-11-01', config });
-    // 人为把草稿修订改成新版本，模拟来源修订漂移
-    useAppStore.getState().updateDraftConfig(runId, { ruleRevision: RULE_REVISION_V2 });
-    await useAppStore.getState().executeRun(runId);
-
-    const approval = useAppStore.getState().approveRun(runId, 'U-2001');
-    expect(approval.ok).toBe(false);
-    const run = useAppStore.getState().runs.find((r) => r.runId === runId)!;
-    expect(run.approval?.revisionMatched).toBe(false);
-    expect(useAppStore.getState().lockRun(runId).ok).toBe(false);
+  it('已结账分区的迟到贷项：分区不回改，生成调整凭证关联原账单行', () => {
+    useAppStore.getState().createRun('initial');
+    useAppStore.getState().confirm({ level: 'account', partition: { accountId: 'ACC-US-02', billDay: '2026-11-02', currency: 'USD' } });
+    useAppStore.getState().closePartition({ accountId: 'ACC-US-02', billDay: '2026-11-02', currency: 'USD' });
+    useAppStore.getState().importSample(sample('platform-bill-late-credit.csv'));
+    const run = useAppStore.getState().createRun('late_credit');
+    const day = run.accountDays.find((d) => partitionKeyString(d) === 'ACC-US-02|2026-11-02|USD')!;
+    expect(day.closed).toBe(true);
+    expect(day.carriedFromRunId).toBeDefined();
+    const vouchers = useAppStore.getState().adjustments;
+    expect(vouchers).toHaveLength(1);
+    expect(vouchers[0].kind).toBe('late_credit');
+    expect(vouchers[0].amountMinor).toBe(-10000);
+    expect(vouchers[0].postedToClosedPartition).toBe(true);
   });
 
-  it('锁定后迟到退款只生成新运行并列出变化订单，旧分享冻结数字不变', async () => {
-    const s = useAppStore.getState();
-    const parentId = s.createDraftRun({ snapshotId: 'DS-2026-11-01', config });
-    await useAppStore.getState().executeRun(parentId);
-    useAppStore.getState().approveRun(parentId, 'U-2001');
-    useAppStore.getState().lockRun(parentId);
-    const share = useAppStore.getState().createSharedReport(parentId, '冻结报告', 'U-2001');
-
-    const oldO2002 = useAppStore.getState()
-      .sharedReports.find((r) => r.shareId === share.shareId)!
-      .frozen.orderAttributions.find((o) => o.orderId === 'O-2002')!;
-    expect(oldO2002.netAmount).toBe(89900);
-
-    const childId = useAppStore.getState().createSupersedingRun(parentId, 'DS-2026-11-05');
-    expect(childId).toBeTruthy();
-    const child = useAppStore.getState().runs.find((r) => r.runId === childId)!;
-    expect(child.parentRunId).toBe(parentId);
-    expect(child.changeSummary?.changedOrders).toContain('O-2002');
-    expect(child.changeSummary?.refundedAfterLock).toContain('O-2002');
-    expect(child.config.ruleRevision).toBe(RULE_REVISION_V2);
-
-    // 父运行保持 locked，旧分享数字不被新退款改写
-    const parent = useAppStore.getState().runs.find((r) => r.runId === parentId)!;
-    expect(parent.status).toBe('locked');
-    const stillFrozen = useAppStore.getState()
-      .sharedReports.find((r) => r.shareId === share.shareId)!
-      .frozen.orderAttributions.find((o) => o.orderId === 'O-2002')!;
-    expect(stillFrozen.netAmount).toBe(89900);
+  it('汇率修订：切版本后仅 USD 11-02 重开，标准金额变化且其他分区继承', () => {
+    useAppStore.getState().createRun('initial');
+    useAppStore.getState().importSample(sample('fx-rates-FX-2026-11B.json'));
+    useAppStore.getState().setFxVersion('FX-2026-11B');
+    const run = useAppStore.getState().createRun('fx_revision');
+    expect(run.fxVersion).toBe('FX-2026-11B');
+    const us1102 = run.accountDays.find((d) => partitionKeyString(d) === 'ACC-US-02|2026-11-02|USD')!;
+    expect(us1102.standardCorrectedMinor).toBe(570400);
+    expect(us1102.carriedFromRunId).toBeUndefined();
+    const us1101 = run.accountDays.find((d) => partitionKeyString(d) === 'ACC-US-02|2026-11-01|USD')!;
+    expect(us1101.carriedFromRunId).toBeDefined();
   });
 
-  it('预算可见性：草稿与计算中运行不可作为预算来源，已完成/已锁定才可读', async () => {
-    const s = useAppStore.getState();
-    const draftId = s.createDraftRun({ snapshotId: 'DS-2026-11-01', config });
-    const readableBefore = useAppStore.getState().runs.filter(
-      (r) => (r.status === 'completed' || r.status === 'locked') && r.results,
-    );
-    expect(readableBefore).toHaveLength(0);
-    expect(draftId).toBeTruthy();
-
-    const runId = s.createDraftRun({ snapshotId: 'DS-2026-11-01', config });
-    await useAppStore.getState().executeRun(runId);
-    const readableAfter = useAppStore.getState().runs.filter(
-      (r) => (r.status === 'completed' || r.status === 'locked') && r.results,
-    );
-    expect(readableAfter.map((r) => r.runId)).toContain(runId);
+  it('字段对应可保存复用', () => {
+    const mapping = useAppStore.getState().saveMapping({
+      name: '测试账单对应', kind: 'bill', columns: { accountId: '账户编号', amount: '金额' },
+    });
+    expect(useAppStore.getState().mappings.some((m) => m.mappingId === mapping.mappingId)).toBe(true);
   });
 });

@@ -1,33 +1,24 @@
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
-import {
-  BarChart3,
-  Database,
-  FlaskConical,
-  PlayCircle,
-  Share2,
-} from 'lucide-react';
-import { ACCOUNTS } from '@/lib/constants';
+import { FileSpreadsheet, PlayCircle, Scale, ReceiptText } from 'lucide-react';
+import { USER_ACCOUNTS } from '@/lib/constants';
 import { useAppStore } from '@/store/useAppStore';
 import DataIngestionPage from '@/pages/DataIngestionPage';
 import RunsPage from '@/pages/RunsPage';
 import ReportPage from '@/pages/ReportPage';
-import BudgetPage from '@/pages/BudgetPage';
-import SharePage from '@/pages/SharePage';
+import AdjustPage from '@/pages/AdjustPage';
 
 const NAV = [
-  { to: '/', label: '数据接入与血缘', sub: '输入快照 · 授权边界', icon: Database },
-  { to: '/runs', label: '归因运行', sub: '草稿 · 审批 · 锁定', icon: PlayCircle },
-  { to: '/report', label: '渠道贡献报告', sub: '订单回查 · 模型对比', icon: BarChart3 },
-  { to: '/budget', label: '预算方案', sub: '只读已完成运行', icon: FlaskConical },
-  { to: '/share', label: '共享报告', sub: '冻结快照 · 不可变', icon: Share2 },
+  { to: '/', label: '数据导入与字段对应', sub: 'CSV/JSON · 拒绝行预览', icon: FileSpreadsheet },
+  { to: '/runs', label: '对账运行', sub: '影响预览 · 版本演进', icon: PlayCircle },
+  { to: '/report', label: '核平报告', sub: '账户日核平 · 差异下钻 · 导出', icon: Scale },
+  { to: '/adjust', label: '调整与财务确认', sub: '贷项/更正 · 分级确认', icon: ReceiptText },
 ];
 
 const TITLES: Record<string, [string, string]> = {
-  '/': ['数据接入与血缘', '数据接入、触点归并与订单净额计算形成可追溯输入'],
-  '/runs': ['归因运行', '绑定时区、成交定义、窗口与规则修订；并行模型只在同一快照上计算'],
-  '/report': ['渠道贡献报告', '份额总和不超过净收入；平台汇总与订单明细分离展示'],
-  '/budget': ['预算方案', '只读取已完成的归因运行，模拟不回写实际订单'],
-  '/share': ['共享报告', '报告固定引用已锁定运行，迟到退款生成新运行不改旧分享'],
+  '/': ['数据导入与字段对应', '导入平台账单、活动小时消耗与服务日汇率，预览列含义与被拒绝的原始行，字段对应可保存复用'],
+  '/runs': ['对账运行', '修改映射、补入贷项或替换汇率后先预览受影响账户日，再产生引用同一输入的新版本运行'],
+  '/report': ['核平报告', '正式核平固定在账户/日期/币种粒度；活动级仅确认平台可核验拆分，未归属余额不伪装成逐活动实收'],
+  '/adjust': ['调整与财务确认', '迟到贷项与平台更正关联原账单行；账户总额与活动归属可分别确认，不平分区禁止核清'],
 };
 
 export default function App() {
@@ -36,16 +27,16 @@ export default function App() {
   const resetDemo = useAppStore((s) => s.resetDemo);
   const location = useLocation();
   const [title, sub] = TITLES[location.pathname] ?? TITLES['/'];
-  const account = ACCOUNTS.find((a) => a.userId === currentUserId);
+  const account = USER_ACCOUNTS.find((a) => a.userId === currentUserId);
 
   return (
     <div className="app-layout">
       <aside className="sidebar">
         <div className="brand">
-          <BarChart3 size={20} />
+          <Scale size={20} />
           <div>
-            渠道归因工作台
-            <small>Channel Attribution Workbench</small>
+            广告账单对账工作台
+            <small>Platform Bill Reconciliation</small>
           </div>
         </div>
         {NAV.map((item) => {
@@ -66,11 +57,17 @@ export default function App() {
           );
         })}
         <div className="sidebar-foot">
-          <button className="sm" style={{ width: '100%', background: 'transparent', color: '#94a3b8', borderColor: '#26334d' }} onClick={() => { if (confirm('清空所有运行、共享与预算方案，恢复演示初始状态？')) resetDemo(); }}>
+          <button
+            className="sm"
+            style={{ width: '100%', background: 'transparent', color: '#94a3b8', borderColor: '#26334d' }}
+            onClick={() => {
+              if (confirm('清空所有导入、运行、调整与确认记录，恢复演示初始状态？')) resetDemo();
+            }}
+          >
             重置演示数据
           </button>
           <p style={{ marginTop: 10, lineHeight: 1.6 }}>
-            所有归因结果仅为规则分摊，<br />不代表渠道因果关系。
+            本功能只核验费用数据，<br />不执行支付、开票或财务记账。
           </p>
         </div>
       </aside>
@@ -86,12 +83,12 @@ export default function App() {
             <select
               value={currentUserId}
               onChange={(e) => switchUser(e.target.value)}
-              style={{ minWidth: 260 }}
+              style={{ minWidth: 300 }}
               title={account?.description}
             >
-              {ACCOUNTS.map((a) => (
+              {USER_ACCOUNTS.map((a) => (
                 <option key={a.userId} value={a.userId}>
-                  {a.name}（{a.role === 'owner' ? '投放负责人' : '分析师'}）
+                  {a.name}（{a.role === 'owner' ? '财务负责人' : '财务分析员'}）
                 </option>
               ))}
             </select>
@@ -102,8 +99,7 @@ export default function App() {
             <Route path="/" element={<DataIngestionPage />} />
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/report" element={<ReportPage />} />
-            <Route path="/budget" element={<BudgetPage />} />
-            <Route path="/share" element={<SharePage />} />
+            <Route path="/adjust" element={<AdjustPage />} />
           </Routes>
         </main>
       </div>

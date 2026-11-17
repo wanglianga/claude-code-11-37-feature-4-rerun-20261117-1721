@@ -1,34 +1,45 @@
-// 金额（分）与时间展示工具
-export function formatYuan(cents: number): string {
-  return (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// 多币种金额与时间展示工具（金额为各币种最小单位整数）
+import { CURRENCIES, STANDARD_CURRENCY } from '@/lib/constants';
+import { formatMinor } from '@/lib/money';
+
+export function minorUnitOf(code: string): number {
+  return CURRENCIES.find((c) => c.code === code)?.minorUnit ?? 2;
 }
 
-export function formatCny(cents: number): string {
-  return `¥${formatYuan(cents)}`;
+export function formatAmount(amountMinor: number, currency: string): string {
+  return `${formatMinor(amountMinor, minorUnitOf(currency))} ${currency}`;
 }
 
-export function formatPercent(ratio: number): string {
-  return `${(ratio * 100).toFixed(1)}%`;
+/** 标准币（CNY，单位：分）展示 */
+export function formatStandard(cents: number): string {
+  return `¥${formatMinor(cents, 2)}`;
+}
+
+export function formatSigned(amountMinor: number, currency: string): string {
+  const sign = amountMinor > 0 ? '+' : '';
+  return `${sign}${formatAmount(amountMinor, currency)}`;
+}
+
+export function formatPercent(bps: number | null): string {
+  if (bps === null) return '—';
+  return `${(bps / 100).toFixed(2)}%`;
 }
 
 export function formatDateTime(iso: string, timezone?: string): string {
   const d = new Date(iso);
   const opts: Intl.DateTimeFormatOptions = {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: timezone,
   };
   try {
     return new Intl.DateTimeFormat('zh-CN', opts).format(d);
   } catch {
-    return d.toISOString();
+    return iso;
   }
 }
 
 export function formatDay(iso: string): string {
   return iso.slice(0, 10);
 }
+
+export { STANDARD_CURRENCY };

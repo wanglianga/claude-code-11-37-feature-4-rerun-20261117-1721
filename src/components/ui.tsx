@@ -1,22 +1,26 @@
 import type { ReactNode } from 'react';
-import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
-import type { RunStatus } from '@/types/domain';
+import { LINE_STATUS_TONE } from '@/lib/constants';
 
-const toneMap: Record<RunStatus, string> = {
-  draft: 'gray',
-  running: 'blue',
-  completed: 'purple',
-  locked: 'green',
-  superseded: 'orange',
+const toneColor: Record<string, string> = {
+  gray: '#5b6675',
+  blue: '#2f54eb',
+  green: '#389e0d',
+  orange: '#d46b08',
+  red: '#cf1322',
+  purple: '#722ed1',
 };
 
-export function StatusBadge({ status }: { status: RunStatus }) {
+export function Badge({ tone = 'gray', children, dot }: { tone?: string; children: ReactNode; dot?: boolean }) {
   return (
-    <span className={`badge ${toneMap[status]}`}>
-      <span style={{ width: 6, height: 6, borderRadius: '50%', background: STATUS_COLORS[status] }} />
-      {STATUS_LABELS[status]}
+    <span className={`badge ${tone}`}>
+      {dot && <span style={{ width: 6, height: 6, borderRadius: '50%', background: toneColor[tone] ?? toneColor.gray }} />}
+      {children}
     </span>
   );
+}
+
+export function LineStatusBadge({ status, label }: { status: string; label: string }) {
+  return <Badge tone={LINE_STATUS_TONE[status] ?? 'gray'}>{label}</Badge>;
 }
 
 export function Modal({

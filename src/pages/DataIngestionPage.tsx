@@ -1,216 +1,288 @@
-import { useMemo, useState } from 'react';
-import EChart from '@/components/EChart';
-import { Modal } from '@/components/ui';
-import { formatCny, formatDateTime } from '@/lib/format';
-import { CHART_COLORS, CHART_TEXT, baseTextStyle } from '@/lib/chart';
-import { useAppStore } from '@/store/useAppStore';
-import type { DataSnapshot, Order } from '@/types/domain';
+import { useMemo, useRef, useState } from 'react';
+import { Upload, Save, FileDown, AlertTriangle, CopySlash } from 'lucide-react';
+import { useAppStore, type ImportOutcome } from '@/store/useAppStore';
+import { ACCOUNTS, CURRENCIES } from '@/lib/constants';
+import {
+  FIELD_CATALOG,
+  parseCsv,
+  parseJsonFile,
+  suggestMapping,
+  type FieldDef,
+} from '@/engine/parse';
+import type { DatasetKind, ImportBatch } from '@/types/domain';
+import { SAMPLE_FILES } from '@/data/sampleFiles';
+import { Badge, EmptyState, KeyValue, Modal } from '@/components/ui';
 
-const STREAM_LABELS: Record<string, string> = {
-  orders: '订单流',
-  order_touchpoints: '订单级触点流',
-  platform_click_aggregate: '平台点击汇总流',
-  refund: '退款流',
-  identity: '身份授权流',
+const KIND_LABELS: Record<DatasetKind, string> = {
+  bill: '平台账单',
+  activity: '活动小时消耗',
+  fx: '服务日汇率',
 };
 
-/** 数据接入与血缘页：输入边界、授权标识、净额管线、平台汇总分离 */
 export default function DataIngestionPage() {
-  const snapshots = useAppStore((s) => s.snapshots);
-  const [snapshotId, setSnapshotId] = useState(snapshots[snapshots.length - 1].snapshotId);
-  const [detailOrder, setDetailOrder] = useState<Order | null>(null);
+  const [kind, setKind] = useState<DatasetKind>('bill');
+  const [text, setText] = useState('');
+  const [fileName, setFileName] = useState('');
+  const [format, setFormat] = useState<'csv' | 'json'>('csv');
+  const [columns, setColumns] = useState<Record<string, string>>({});
+  const [constants, setConstants] = useState<Record<string, string>>({});
+  const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
+  const [detailBatch, setDetailBatch] = useState<ImportBatch | null>(null);
+  const [mappingName, setMappingName] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+  const { batches, importFile, saveMapping } = useAppStore();
 
-  const snapshot = snapshots.find((s) => s.snapshotId === snapshotId) ?? snapshots[0];
+  const parsed = useMemo(() => {
+    if (!text.trim()) return null;
+    try {
+      return format === 'csv' ? parseCsv(text) : parseJsonFile(text);
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }, [text, format]);
 
-  const totals = useMemo(() => {
-    const gross = snapshot.orders.reduce((s, o) => s + o.grossAmount, 0);
-    const refunded = snapshot.orderVersions.reduce((s, v) => s + v.refundedAmount, 0);
-    const net = snapshot.orderVersions.reduce((s, v) => s + v.netAmount, 0);
-    const platformCost = snapshot.platformClicks.reduce((s, a) => s + a.cost, 0);
-    const platformClicks = snapshot.platformClicks.reduce((s, a) => s + a.clicks, 0);
-    return { gross, refunded, net, platformCost, platformClicks };
-  }, [snapshot]);
+  const loadText = (next: string, name: string, fmt: 'csv' | 'json', preset?: Record<string, string>) => {
+    setText(next);
+    setFileName(name);
+    setFormat(fmt);
+    setOutcome(null);
+    // 等 headers 可用后再给建议
+    try {
+      const p = fmt === 'csv' ? parseCsv(next) : parseJsonFile(next);
+      setColumns(preset ?? suggestMapping(kind, p.headers));
+      setConstants({});
+    } catch {
+      setColumns({});
+    }
+  };
 
-  const channelMap = new Map(snapshot.channels.map((c) => [c.channelId, c]));
+  const onUpload = async (file: File) => {
+    const fmt = file.name.endsWith('.json') ? 'json' : 'csv';
+    const content = await file.text();
+    setFormat(fmt);
+    loadText(content, file.name, fmt);
+  };
 
-  const costByChannel = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const a of snapshot.platformClicks) m.set(a.channelId, (m.get(a.channelId) ?? 0) + a.cost);
-    return [...m.entries()].map(([id, cost]) => ({ name: channelMap.get(id)?.name ?? id, cost }));
-  }, [snapshot]);
+  const switchKind = (k: DatasetKind) => {
+    setKind(k);
+    setText('');
+    setOutcome(null);
+    setColumns({});
+    setConstants({});
+    setFileName('');
+  };
+
+  const doImport = () => {
+    if (!parsed || 'error' in parsed) return;
+    const result = importFile({ kind, fileName: fileName || '手动粘贴.txt', format, text, columns, constants });
+    setOutcome(result);
+  };
+
+  const doSaveMapping = () => {
+    const name = mappingName.trim() || `${KIND_LABELS[kind]}字段对应-${new Date().toISOString().slice(0, 10)}`;
+    saveMapping({ name, kind, columns, constants });
+    setMappingName('');
+    alert(`字段对应「${name}」已保存，后续同结构文件可直接复用`);
+  };
+
+  const kindBatches = batches.filter((b) => b.kind === kind);
+  const fields = FIELD_CATALOG[kind];
+  const previewRows = parsed && !('error' in parsed) ? parsed.rows.slice(0, 5) : [];
 
   return (
-    <>
-      <div className="form-row" style={{ marginBottom: 14 }}>
-        <label className="field">
-          输入快照（同一分析运行只绑定一个快照）
-          <select value={snapshotId} onChange={(e) => setSnapshotId(e.target.value)} style={{ minWidth: 320 }}>
-            {snapshots.map((s) => (
-              <option key={s.snapshotId} value={s.snapshotId}>
-                {s.snapshotId} · {s.dataVersion} · 规则修订 {s.ruleRevision}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className="notice info">
-        <div>
-          <strong>输入边界：</strong>平台点击汇总与订单级触点分开保存。只有带稳定订单关联且标识授权的订单级触点参与逐单分配；
-          无法匹配的费用与点击只保留在下方「平台汇总区」，两个区域的金额禁止相加。
-        </div>
-      </div>
-
-      <div className="grid cols-4">
-        <div className="stat"><div className="label">订单毛额合计</div><div className="value">{formatCny(totals.gross)}</div><div className="sub">{snapshot.orders.length} 笔订单</div></div>
-        <div className="stat alert"><div className="label">累计退款扣减</div><div className="value">{formatCny(totals.refunded)}</div><div className="sub">{snapshot.refunds.length} 笔退款流水</div></div>
-        <div className="stat"><div className="label">订单净额合计</div><div className="value">{formatCny(totals.net)}</div><div className="sub">毛额 − 退款（取消单净额为 0）</div></div>
-        <div className="stat unknown"><div className="label">平台汇总费用（不可与明细相加）</div><div className="value">{formatCny(totals.platformCost)}</div><div className="sub">{totals.platformClicks.toLocaleString()} 次汇总点击</div></div>
+    <div>
+      <div className="tabs">
+        {(Object.keys(KIND_LABELS) as DatasetKind[]).map((k) => (
+          <div key={k} className={`tab${kind === k ? ' active' : ''}`} onClick={() => switchKind(k)}>
+            {KIND_LABELS[k]}
+          </div>
+        ))}
       </div>
 
       <div className="card">
-        <div className="card-title">① 接入作业血缘 <span className="hint">来源、记录数、校验和、隔离记录</span></div>
-        <table>
-          <thead><tr><th>作业</th><th>来源系统</th><th>数据流</th><th>拉取时间</th><th className="num">记录数</th><th>校验和</th><th>状态</th><th>备注</th></tr></thead>
-          <tbody>
-            {snapshot.ingestionJobs.map((j) => (
-              <tr key={j.jobId}>
-                <td className="mono">{j.jobId}</td>
-                <td>{j.source}</td>
-                <td>{STREAM_LABELS[j.stream]}</td>
-                <td className="small">{formatDateTime(j.fetchedAt)}</td>
-                <td className="num">{j.recordCount}</td>
-                <td className="mono muted">{j.checksum}</td>
-                <td>{j.status === 'success' ? <span className="badge green">成功</span> : <span className="badge red">已隔离</span>}</td>
-                <td className="small muted">{j.note ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="card-title">
+          ① 选择示例文件或上传 {KIND_LABELS[kind]}（CSV / JSON）
+          <span className="hint">示例文件同样走解析管线，页面数值均来自本次输入</span>
+        </div>
+        <div className="pill-row" style={{ marginBottom: 12 }}>
+          {SAMPLE_FILES.filter((f) => f.kind === kind).map((f) => (
+            <button key={f.fileName} className="sm" title={f.description} onClick={() => loadText(f.text, f.fileName, f.format, f.mapping)}>
+              <FileDown size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+              {f.fileName}
+            </button>
+          ))}
+        </div>
+        <div className="form-row">
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.json,text/csv,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
+          />
+          <button className="primary" onClick={() => fileRef.current?.click()}>
+            <Upload size={14} style={{ verticalAlign: -2, marginRight: 4 }} />上传文件
+          </button>
+          <span className="muted small">或直接在下方粘贴文本；当前文件：{fileName || '未选择'}</span>
+        </div>
+        <textarea
+          style={{ width: '100%', minHeight: 150, marginTop: 12, fontFamily: 'var(--mono)', fontSize: 12 }}
+          placeholder="粘贴 CSV 或 JSON 内容…"
+          value={text}
+          onChange={(e) => loadText(e.target.value, fileName || '手动粘贴内容', format)}
+        />
       </div>
 
-      <div className="grid cols-2">
-        <div className="card">
-          <div className="card-title">② 确定性标识与授权边界 <span className="hint">未授权跨设备不拼人</span></div>
-          <table>
-            <thead><tr><th>人员</th><th>跨设备授权</th><th>标识（设备）</th></tr></thead>
-            <tbody>
-              {snapshot.identityLinks.map((p) => (
-                <tr key={p.personId}>
-                  <td>
-                    <div className="mono">{p.personId}</div>
-                    <div className="small muted">{p.displayName}</div>
-                  </td>
-                  <td>{p.crossDeviceAuthorized ? <span className="badge green">已授权</span> : <span className="badge red">未授权</span>}</td>
-                  <td className="small">
-                    {p.identifiers.map((i) => (
-                      <div key={`${i.kind}-${i.value}-${i.deviceId}`} className="mono">
-                        {i.kind}={i.value} <span className="muted">@ {i.deviceId}</span>
-                        {i.authorized ? '' : ' <span className="badge red">未授权</span>'}
-                      </div>
-                    ))}
-                    {p.note && <div className="small" style={{ color: 'var(--warning)', marginTop: 4 }}>⚠ {p.note}</div>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {parsed && 'error' in parsed && (
+        <div className="notice error"><AlertTriangle size={15} />文件解析失败：{parsed.error}</div>
+      )}
 
-        <div className="card">
-          <div className="card-title">③ 订单净额管线 <span className="hint">毛额 → 退款 → 净额，逐版本可追溯</span></div>
-          <table>
-            <thead><tr><th>订单</th><th className="num">毛额</th><th className="num">退款</th><th className="num">净额</th><th>状态</th></tr></thead>
-            <tbody>
-              {snapshot.orderVersions.map((v) => {
-                const order = snapshot.orders.find((o) => o.orderId === v.orderId);
-                return (
-                  <tr key={v.orderId} className="clickable" onClick={() => order && setDetailOrder(order)}>
-                    <td className="mono">{v.orderId}{order?.scenarioTag && <div className="tag-scenario" style={{ marginTop: 3 }}>{order.scenarioTag.split('：')[0]}</div>}</td>
-                    <td className="num">{formatCny(v.grossAmount)}</td>
-                    <td className="num" style={{ color: v.refundedAmount ? 'var(--warning)' : undefined }}>{formatCny(v.refundedAmount)}</td>
-                    <td className="num"><strong>{formatCny(v.netAmount)}</strong></td>
-                    <td><span className={`badge ${v.status === 'cancelled' ? 'gray' : v.status.startsWith('refunded') ? 'orange' : 'green'}`}>{v.status}</span></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <div className="small muted" style={{ marginTop: 8 }}>点击订单行可查看场景标签与完整净额版本。</div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-title">④ 平台汇总区（无订单级标识，不参与逐单分配）</div>
-        <div className="grid cols-2" style={{ alignItems: 'start' }}>
-          <div>
+      {parsed && !('error' in parsed) && (
+        <>
+          <div className="card">
+            <div className="card-title">
+              ② 预览列含义并建立字段对应
+              <span className="hint">识别到 {parsed.headers.length} 列 / {parsed.rows.length} 行；别名已自动匹配，可手动修正并保存</span>
+            </div>
             <table>
-              <thead><tr><th>平台/渠道</th><th>日期</th><th className="num">点击</th><th className="num">费用</th><th>订单标识</th></tr></thead>
+              <thead>
+                <tr>
+                  <th style={{ width: 170 }}>标准字段</th>
+                  <th style={{ width: 70 }}>必填</th>
+                  <th style={{ width: 240 }}>源列</th>
+                  <th>缺列时常量值</th>
+                  <th>口径说明</th>
+                </tr>
+              </thead>
               <tbody>
-                {snapshot.platformClicks.map((a) => (
-                  <tr key={a.aggId}>
-                    <td className="small">{a.platform}<div className="muted">{channelMap.get(a.channelId)?.name} · {a.campaignId}</div></td>
-                    <td className="mono small">{a.day}</td>
-                    <td className="num">{a.clicks.toLocaleString()}</td>
-                    <td className="num">{formatCny(a.cost)}</td>
-                    <td><span className="badge red">无</span></td>
+                {fields.map((f: FieldDef) => (
+                  <tr key={f.key}>
+                    <td>{f.label}</td>
+                    <td>{f.required ? <Badge tone="red">必填</Badge> : <span className="muted">可选</span>}</td>
+                    <td>
+                      <select
+                        style={{ width: '100%' }}
+                        value={columns[f.key] ?? ''}
+                        onChange={(e) => setColumns((c) => ({ ...c, [f.key]: e.target.value }))}
+                      >
+                        <option value="">— 不映射 —</option>
+                        {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        style={{ width: 180 }}
+                        placeholder="整文件固定值"
+                        value={constants[f.key] ?? ''}
+                        onChange={(e) => setConstants((c) => ({ ...c, [f.key]: e.target.value }))}
+                      />
+                    </td>
+                    <td className="muted small">{f.hint}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            {snapshot.platformClicks.some((a) => a.note) && (
-              <div className="small muted" style={{ marginTop: 8 }}>
-                {snapshot.platformClicks.filter((a) => a.note).map((a) => <div key={a.aggId}>· {a.aggId}：{a.note}</div>)}
+            <div className="form-row" style={{ marginTop: 12 }}>
+              <input placeholder="字段对应方案名称（可选）" value={mappingName} onChange={(e) => setMappingName(e.target.value)} style={{ minWidth: 240 }} />
+              <button onClick={doSaveMapping}><Save size={14} style={{ verticalAlign: -2, marginRight: 4 }} />保存字段对应</button>
+              <button className="primary" onClick={doImport}>执行导入与受理判重</button>
+            </div>
+            {fields.filter((f) => f.required && !columns[f.key] && !constants[f.key]).length > 0 && (
+              <div className="notice warn" style={{ marginTop: 10 }}>
+                <AlertTriangle size={15} />
+                仍有必填字段未映射：{fields.filter((f) => f.required && !columns[f.key] && !constants[f.key]).map((f) => f.label).join('、')}，相关行将被拒绝。
               </div>
             )}
           </div>
-          <EChart
-            option={{
-              color: CHART_COLORS,
-              textStyle: baseTextStyle,
-              title: { text: '平台汇总费用（分渠道，仅汇总口径）', left: 'center', textStyle: { fontSize: 13, color: CHART_TEXT } },
-              tooltip: { trigger: 'item', valueFormatter: (v: unknown) => formatCny(Number(v)) },
-              legend: { bottom: 0, textStyle: { color: CHART_TEXT } },
-              series: [{
-                type: 'pie',
-                radius: ['38%', '62%'],
-                center: ['50%', '46%'],
-                data: costByChannel.map((c) => ({ name: c.name, value: c.cost })),
-                label: { formatter: '{b}\n{d}%' },
-              }],
-            }}
-            className="chart-box short"
-          />
+
+          <div className="card">
+            <div className="card-title">③ 数据预览（前 5 行原始值）</div>
+            <div style={{ overflowX: 'auto' }}>
+              <table>
+                <thead><tr>{parsed.headers.map((h) => <th key={h}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {previewRows.map((r, i) => (
+                    <tr key={i}>{parsed.headers.map((h) => <td key={h} className="mono small">{r[h]}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {outcome && (
+        <div className={`notice ${outcome.rejectedCount > 0 ? 'warn' : 'success'}`}>
+          <CopySlash size={15} />
+          <div>
+            导入完成：共 {outcome.totalRows} 行，受理 {outcome.acceptedCount} 行，拒绝 {outcome.rejectedCount} 行，
+            重复件 {outcome.duplicateCount} 件，修订候选 {outcome.revisionCount} 件。
+            {outcome.messages.map((m, i) => <div key={i} className="small">· {m}</div>)}
+          </div>
         </div>
+      )}
+
+      <div className="card">
+        <div className="card-title">④ 受理账批次（{kindBatches.length}）<span className="hint">保留原始行、账期与拒绝原因</span></div>
+        {kindBatches.length === 0 ? <EmptyState text="暂无导入批次" /> : (
+          <table>
+            <thead>
+              <tr><th>批次 / 文件</th><th>格式</th><th className="num">总行</th><th className="num">受理</th><th className="num">拒绝</th><th className="num">重复</th><th>导入时间</th><th></th></tr>
+            </thead>
+            <tbody>
+              {[...kindBatches].reverse().map((b) => (
+                <tr key={b.batchId}>
+                  <td><div className="mono small">{b.fileName}</div><div className="muted small">{b.batchId}</div></td>
+                  <td>{b.format.toUpperCase()}</td>
+                  <td className="num">{b.totalRows}</td>
+                  <td className="num">{b.billRows.length + b.activityRows.length + b.fxRows.length}</td>
+                  <td className="num">{b.rejected.length > 0 ? <Badge tone="orange">{b.rejected.length}</Badge> : 0}</td>
+                  <td className="num">{b.duplicates.length > 0 ? <Badge tone="purple">{b.duplicates.length}</Badge> : 0}</td>
+                  <td className="small muted">{b.importedAt.replace('T', ' ').slice(0, 19)}</td>
+                  <td><button className="sm" onClick={() => setDetailBatch(b)}>查看原始行</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      <OrderVersionModal order={detailOrder} snapshot={snapshot} onClose={() => setDetailOrder(null)} />
-    </>
-  );
-}
-
-function OrderVersionModal({ order, snapshot, onClose }: { order: Order | null; snapshot: DataSnapshot; onClose: () => void }) {
-  if (!order) return null;
-  const v = snapshot.orderVersions.find((x) => x.orderId === order.orderId);
-  return (
-    <Modal open={!!order} title={<span>订单净额版本 <span className="mono">{order.orderId}</span></span>} onClose={onClose}>
-      {order.scenarioTag && <div className="notice info">{order.scenarioTag}</div>}
-      <table>
-        <thead><tr><th>数据版本</th><th className="num">毛额</th><th className="num">退款扣减</th><th className="num">净额</th><th>状态</th><th>关联退款</th></tr></thead>
-        <tbody>
-          <tr>
-            <td className="mono">{v?.dataVersion}</td>
-            <td className="num">{v ? formatCny(v.grossAmount) : '—'}</td>
-            <td className="num">{v ? formatCny(v.refundedAmount) : '—'}</td>
-            <td className="num"><strong>{v ? formatCny(v.netAmount) : '—'}</strong></td>
-            <td>{v?.status}</td>
-            <td className="mono small">{v?.refundIds.join('、') || '无'}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div className="small muted" style={{ marginTop: 10 }}>
-        净额计算公式：净收入 = 毛额 − 累计退款；取消订单净额强制为 0。退款晚到时会生成新数据版本与新归因运行，旧运行图表保持不变。
+      <div className="card tight">
+        <div className="card-title">账户与币种口径（金额标准化固定使用）</div>
+        <KeyValue rows={[
+          ['账户', <span>{ACCOUNTS.map((a) => `${a.accountId}（${a.name} · ${a.currency} · ${a.timezone}）`).join('；')}</span>],
+          ['币种小数位', <span>{CURRENCIES.map((c) => `${c.code}=${c.minorUnit} 位`).join('；')}（由输入口径登记，换算不写死）</span>],
+        ]} />
       </div>
-    </Modal>
+
+      <Modal open={!!detailBatch} title={`批次原始行 — ${detailBatch?.fileName ?? ''}`} onClose={() => setDetailBatch(null)} wide>
+        {detailBatch && (
+          <>
+            <h4 style={{ marginBottom: 8 }}>被拒绝的原始行（{detailBatch.rejected.length}）</h4>
+            {detailBatch.rejected.length === 0 ? <EmptyState text="无拒绝行" /> : (
+              <table style={{ marginBottom: 16 }}>
+                <thead><tr><th style={{ width: 70 }}>行号</th><th>拒绝原因</th><th>原始内容</th></tr></thead>
+                <tbody>
+                  {detailBatch.rejected.map((r, i) => (
+                    <tr key={i}><td className="num">{r.rowNumber || '—'}</td><td className="small">{r.reason}</td><td className="mono small">{JSON.stringify(r.raw)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <h4 style={{ marginBottom: 8 }}>重复件留痕（{detailBatch.duplicates.length}，不二次入账）</h4>
+            {detailBatch.duplicates.length === 0 ? <EmptyState text="无重复件" /> : (
+              <table>
+                <thead><tr><th>判重原因</th><th>原始内容</th></tr></thead>
+                <tbody>
+                  {detailBatch.duplicates.map((r, i) => (
+                    <tr key={i}><td className="small">{r.reason}</td><td className="mono small">{JSON.stringify(r.raw)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
+      </Modal>
+    </div>
   );
 }
